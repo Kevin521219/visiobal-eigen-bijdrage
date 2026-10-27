@@ -1,0 +1,564 @@
+import { Ionicons } from '@expo/vector-icons';
+import { useIsFocused } from '@react-navigation/native';
+import { Canvas } from '@react-three/fiber/native';
+import { LinearGradient } from 'expo-linear-gradient';
+import { useRouter } from 'expo-router';
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  ActivityIndicator,
+  Animated,
+  Alert,
+  Dimensions,
+  InteractionManager,
+  Modal,
+  PanResponder,
+  Pressable,
+  StatusBar,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+
+import { FrequencySlider } from '@/src/components/FrequencySlider';
+import { BackgroundDust, TexturedVisioball } from '@/src/components/VisioballModel';
+import { useI18n } from '@/src/context/I18nContext';
+import { TRACKS, usePlayerState } from '@/src/context/PlayerContext';
+import { ThemeColors, useTheme } from '@/src/context/ThemeContext';
+import { useBluetoothSession } from '@/src/hooks/useBluetoothSession';
+import { loadDevicePreset, saveDevicePreset } from '@/src/services/devicePresetStorage';
+import { configureThreeNativeRenderer } from '@/src/utils/configureThreeNativeRenderer';
+
+const { width } = Dimensions.get('window');
+const VOLUME_STEPS = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100];
+
+const MOTOR_MODES = ['Gentle', 'Dynamic', 'Random'] as const;
+type MotorMode = typeof MOTOR_MODES[number];
+const MOTOR_KEYS: Record<MotorMode, string> = { Gentle: 'motorGentle', Dynamic: 'motorDynamic', Random: 'motorRandom' };
+
+const LIGHT_MODES = ['Constant', 'Breathing', 'Heartbeat'] as const;
+type LightMode = typeof LIGHT_MODES[number];
+const LIGHT_KEYS: Record<LightMode, string> = { Constant: 'lightConstant', Breathing: 'lightBreathing', Heartbeat: 'lightHeartbeat' };
+
+function clamp(value: number, minimumValue: number, maximumValue: number) {
+  return Math.min(Math.max(value, minimumValue), maximumValue);
+}
+
+function makeStyles(theme: ThemeColors) {
+  return StyleSheet.create({
+    root: { flex: 1, backgroundColor: theme.bgDeep },
+    safeArea: { flex: 1 },
+    container: { flex: 1, justifyContent: 'space-between' },
+    header: {
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      paddingHorizontal: 24,
+      paddingTop: 12,
+      paddingBottom: 4,
+    },
+    wordmarkWrap: { gap: 2 },
+    wordmark: { color: theme.text, fontSize: 22, fontWeight: '900', letterSpacing: 5 },
+    tagline: { color: theme.textMuted, fontSize: 11, fontWeight: '600', letterSpacing: 1 },
+    powerBtn: {
+      width: 44, height: 44, backgroundColor: theme.card, borderRadius: 14,
+      alignItems: 'center', justifyContent: 'center',
+    },
+    hero: { alignItems: 'center', justifyContent: 'center' },
+    canvasWrap: { width, height: width },
+    canvas: { height: '100%', width: '100%' },
+    bottom: { paddingHorizontal: 16, paddingBottom: 16 },
+    bottomCard: {
+      backgroundColor: theme.card,
+      borderRadius: 28, borderWidth: 1, borderColor: theme.borderStrong,
+      padding: 16, gap: 12,
+    },
+    trackRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+    trackArt: {
+      width: 44, height: 44, borderRadius: 13,
+      backgroundColor: theme.bgDeep,
+      borderWidth: 1, borderColor: 'rgba(69,220,192,0.22)',
+      alignItems: 'center', justifyContent: 'center',
+    },
+    trackInfo: { flex: 1 },
+    trackTitle: { color: theme.text, fontSize: 14, fontWeight: '800', marginBottom: 2 },
+    trackMeta: { color: theme.textMuted, fontSize: 12, fontWeight: '600' },
+    playingBadge: {
+      flexDirection: 'row', alignItems: 'center', gap: 5,
+      backgroundColor: 'rgba(69,220,192,0.12)',
+      paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8,
+    },
+    playingDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: theme.accent },
+    playingText: { color: theme.accent, fontSize: 10, fontWeight: '800', letterSpacing: 1 },
+    musicControls: {
+      flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 28,
+    },
+    ctrlBtn: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
+    playBtn: {
+      width: 58, height: 58, borderRadius: 18, backgroundColor: theme.accent,
+      alignItems: 'center', justifyContent: 'center',
+      shadowColor: theme.accent, shadowOffset: { width: 0, height: 5 }, shadowOpacity: 0.5, shadowRadius: 16, elevation: 10,
+    },
+    volumeSection: { width: '100%', borderTopWidth: 1, borderTopColor: theme.separator, paddingTop: 12 },
+    volumeHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 2 },
+    volumeLabel: { color: theme.textSubtle, fontSize: 10, fontWeight: '800', letterSpacing: 2 },
+    volumeValue: { color: theme.accent, fontSize: 12, fontWeight: '900' },
+    ticksRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginTop: 4 },
+    tickItem: { alignItems: 'center', gap: 3 },
+    tickDot: { width: 3, height: 5, borderRadius: 1.5, backgroundColor: theme.tickInactive },
+    tickDotActive: { backgroundColor: theme.accent },
+    tickLabel: { color: theme.tickLabel, fontSize: 8, fontWeight: '700' },
+    tickLabelActive: { color: theme.accent },
+    cardDivider: { height: 1, backgroundColor: theme.separator },
+    actionRow: { flexDirection: 'row', gap: 12 },
+    primaryBtn: {
+      flex: 1, backgroundColor: theme.accentStrong, flexDirection: 'row',
+      paddingVertical: 16, borderRadius: 20, justifyContent: 'center', alignItems: 'center', gap: 10,
+      shadowColor: theme.accentStrong, shadowOffset: { width: 0, height: 8 }, shadowOpacity: 0.5, shadowRadius: 20, elevation: 10,
+    },
+    primaryBtnText: { color: '#fff', fontSize: 16, fontWeight: '800' },
+    secondaryBtn: {
+      width: 56, backgroundColor: theme.bgDeep, borderRadius: 20,
+      justifyContent: 'center', alignItems: 'center',
+      borderWidth: 1, borderColor: 'rgba(15,118,110,0.28)',
+    },
+    overlay: { flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(0,0,0,0.55)' },
+    sheet: {
+      backgroundColor: theme.cardAlt,
+      borderTopLeftRadius: 28, borderTopRightRadius: 28,
+      padding: 20, paddingBottom: 48,
+      borderTopWidth: 2, borderLeftWidth: 1, borderRightWidth: 1,
+      borderColor: 'rgba(15,118,110,0.45)',
+    },
+    handle: { width: 44, height: 5, backgroundColor: theme.handleBar, borderRadius: 3, alignSelf: 'center', marginBottom: 22 },
+    sheetHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 22 },
+    sheetTitle: { color: theme.text, fontSize: 22, fontWeight: '900' },
+    closeBtn: {
+      width: 34, height: 34, backgroundColor: theme.card, borderRadius: 11,
+      alignItems: 'center', justifyContent: 'center',
+    },
+    stepperRow: { flexDirection: 'row', gap: 12, marginBottom: 22 },
+    stepperCard: {
+      flex: 1, backgroundColor: theme.card, borderRadius: 16, padding: 14,
+      borderWidth: 1, borderColor: theme.border,
+    },
+    stepperLabel: { color: theme.textMuted, fontSize: 10, fontWeight: '800', letterSpacing: 2, marginBottom: 10 },
+    stepper: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+    stepBtn: {
+      width: 32, height: 32, backgroundColor: theme.bgDeep, borderRadius: 10,
+      borderWidth: 1, borderColor: theme.border, alignItems: 'center', justifyContent: 'center',
+    },
+    stepBtnText: { color: theme.accentStrong, fontSize: 20, fontWeight: '300', lineHeight: 22 },
+    stepVal: { color: theme.text, fontSize: 26, fontWeight: '900' },
+    segLabel: { color: theme.textMuted, fontSize: 10, fontWeight: '800', letterSpacing: 2, marginBottom: 8 },
+    seg: {
+      flexDirection: 'row', backgroundColor: theme.bgDeep, borderRadius: 14,
+      padding: 4, gap: 3, marginBottom: 20, borderWidth: 1, borderColor: theme.border,
+    },
+    segOpt: { flex: 1, paddingVertical: 12, alignItems: 'center', borderRadius: 11 },
+    segOptActive: { backgroundColor: 'rgba(15,118,110,0.18)', borderWidth: 1, borderColor: 'rgba(15,118,110,0.3)' },
+    segText: { color: theme.textMuted, fontSize: 13, fontWeight: '700' },
+    segTextActive: { color: theme.accentAlt },
+    musicBtn: {
+      backgroundColor: theme.accentStrong, flexDirection: 'row', paddingVertical: 18,
+      borderRadius: 18, alignItems: 'center', justifyContent: 'center', gap: 10, marginTop: 4,
+      shadowColor: theme.accentStrong, shadowOffset: { width: 0, height: 6 }, shadowOpacity: 0.4, shadowRadius: 16,
+    },
+    musicBtnText: { color: '#fff', fontSize: 15, fontWeight: '800' },
+    musicChevron: { position: 'absolute', right: 18 },
+    routineSaveButton: {
+      flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 9,
+      borderWidth: 1, borderColor: theme.borderAccent, backgroundColor: theme.card,
+      paddingVertical: 13, borderRadius: 15, marginBottom: 10,
+    },
+    routineSaveText: { color: theme.accent, fontSize: 14, fontWeight: '800' },
+    routineStatus: { color: theme.textMuted, fontSize: 11, fontWeight: '600', textAlign: 'center', marginTop: 9 },
+    pressed: { opacity: 0.75, transform: [{ scale: 0.97 }] },
+  });
+}
+
+export default function LandingPage() {
+  const router = useRouter();
+  const isFocused = useIsFocused();
+  const { isDark, theme } = useTheme();
+  const { t } = useI18n();
+  const styles = useMemo(() => makeStyles(theme), [theme]);
+  const { isConnected, canSendCommands, sendCommandToBall } = useBluetoothSession();
+  const { isPlaying, trackIndex, setIsPlaying, setTrackIndex } = usePlayerState();
+  const currentTrack = TRACKS[trackIndex] ?? TRACKS[0];
+
+  const [showOptions, setShowOptions] = useState(false);
+  const [speed, setSpeed] = useState(12);
+  const [interval, setIntervalVal] = useState(15);
+  const [motorMode, setMotorMode] = useState<MotorMode>('Gentle');
+  const [lightMode, setLightMode] = useState<LightMode>('Constant');
+  const [hasSavedRoutine, setHasSavedRoutine] = useState(false);
+  const [volume, setVolume] = useState(5);
+
+  useEffect(() => {
+    let isMounted = true;
+    void loadDevicePreset().then(preset => {
+      if (!isMounted || !preset) return;
+      setSpeed(preset.speed);
+      setIntervalVal(preset.interval);
+      setMotorMode(preset.motorMode);
+      setLightMode(preset.lightMode);
+      setHasSavedRoutine(true);
+    }).catch(() => {});
+    return () => { isMounted = false; };
+  }, []);
+
+  const handleSaveRoutine = async () => {
+    try {
+      await saveDevicePreset({ speed, interval, motorMode, lightMode });
+      setHasSavedRoutine(true);
+      Alert.alert(t('routineSaved'), t('routineSavedMessage'));
+    } catch {
+      Alert.alert(t('failed'));
+    }
+  };
+
+  const playScale = useRef(new Animated.Value(1)).current;
+  const skipBackScale = useRef(new Animated.Value(1)).current;
+  const skipFwdScale = useRef(new Animated.Value(1)).current;
+  const livePulse = useRef(new Animated.Value(1)).current;
+  const ballRotRef = useRef({ x: 0.12, y: 0.2 });
+  const panStartRef = useRef({ x: 0.12, y: 0.2 });
+  const [showCanvas, setShowCanvas] = useState(isFocused);
+  const [canvasVersion, setCanvasVersion] = useState(0);
+  const displayIsPlaying = isConnected && isPlaying;
+
+  const pressIn = useCallback((scale: Animated.Value) => {
+    Animated.spring(scale, { toValue: 1.22, useNativeDriver: true, tension: 300, friction: 8 }).start();
+  }, []);
+  const pressOut = useCallback((scale: Animated.Value) => {
+    Animated.spring(scale, { toValue: 1, useNativeDriver: true, tension: 200, friction: 10 }).start();
+  }, []);
+
+  const sendHardwareCommand = useCallback((command: string) => {
+    if (!isConnected || !canSendCommands) return;
+    void sendCommandToBall(command).catch(() => {});
+  }, [canSendCommands, isConnected, sendCommandToBall]);
+
+  const selectTrackAndPlay = useCallback((nextTrackIndex: number) => {
+    const nextTrack = TRACKS[nextTrackIndex] ?? TRACKS[0];
+    const canPlayOnBall = isConnected && canSendCommands;
+
+    setTrackIndex(nextTrackIndex);
+    setIsPlaying(canPlayOnBall);
+
+    if (!canPlayOnBall) {
+      return;
+    }
+
+    void (async () => {
+      await sendCommandToBall(nextTrack.command);
+      await sendCommandToBall('PLAY');
+    })().catch(() => {});
+  }, [canSendCommands, isConnected, sendCommandToBall, setIsPlaying, setTrackIndex]);
+
+  const togglePlay = () => {
+    if (!isConnected || !canSendCommands) {
+      setIsPlaying(false);
+      return;
+    }
+
+    const nextIsPlaying = !isPlaying;
+    sendHardwareCommand(nextIsPlaying ? 'PLAY' : 'PAUSE');
+    setIsPlaying(nextIsPlaying);
+  };
+
+  const skipNext = () => {
+    selectTrackAndPlay((trackIndex + 1) % TRACKS.length);
+  };
+
+  const skipPrev = () => {
+    selectTrackAndPlay((trackIndex - 1 + TRACKS.length) % TRACKS.length);
+  };
+
+  const handleVolumeComplete = (nextVolume: number) => {
+    const roundedVolume = Math.round(nextVolume);
+    setVolume(roundedVolume);
+    sendHardwareCommand(`VOL:${roundedVolume}`);
+  };
+
+  const ballPan = useRef(PanResponder.create({
+    onMoveShouldSetPanResponder: (_, g) => Math.abs(g.dx) > 4 || Math.abs(g.dy) > 4,
+    onPanResponderGrant: () => { panStartRef.current = ballRotRef.current; },
+    onPanResponderMove: (_, g) => {
+      const next = {
+        x: clamp(panStartRef.current.x + g.dy / 140, -1.1, 1.1),
+        y: panStartRef.current.y + g.dx / 110,
+      };
+      ballRotRef.current = next;
+    },
+    onStartShouldSetPanResponder: () => true,
+  })).current;
+
+  useEffect(() => {
+    if (!isFocused) {
+      setShowCanvas(false);
+      return;
+    }
+
+    setShowCanvas(false);
+
+    const interaction = InteractionManager.runAfterInteractions(() => {
+      setCanvasVersion(version => version + 1);
+      setShowCanvas(true);
+    });
+
+    return () => interaction.cancel();
+  }, [isFocused]);
+
+  useEffect(() => {
+    if (!isPlaying) { livePulse.setValue(1); return; }
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(livePulse, { toValue: 0.25, duration: 550, useNativeDriver: true }),
+        Animated.timing(livePulse, { toValue: 1, duration: 550, useNativeDriver: true }),
+      ])
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [isPlaying, livePulse]);
+
+  const outerGlowColor = isDark ? 'rgba(15,88,81,0.24)' : 'rgba(69,220,192,0.10)';
+  const midGlowColor = isDark ? 'rgba(15,65,70,0.22)' : 'rgba(69,220,192,0.07)';
+
+  return (
+    <View style={styles.root}>
+      <LinearGradient
+        colors={[theme.gradStart, theme.gradMid, theme.gradEnd]}
+        locations={[0, 0.5, 1]}
+        style={StyleSheet.absoluteFill}
+      />
+      <SafeAreaView style={styles.safeArea}>
+        <StatusBar barStyle={theme.statusBarStyle} />
+        <View style={styles.container}>
+
+          <View style={styles.header}>
+            <View style={styles.wordmarkWrap}>
+              <Text style={styles.wordmark}>VISIOBALL</Text>
+              <Text style={styles.tagline}>{t('tagline')}</Text>
+            </View>
+            <Pressable
+              style={({ pressed }) => [styles.powerBtn, pressed && styles.pressed]}
+              onPress={() => router.replace({ pathname: '/settings', params: { from: 'landing' } })}
+            >
+              <Ionicons name="settings-outline" size={20} color={theme.textMuted} />
+            </Pressable>
+          </View>
+
+          <View style={styles.hero}>
+            <View style={{ position: 'absolute', width: 300, height: 300, borderRadius: 150, backgroundColor: outerGlowColor }} />
+            <View style={{ position: 'absolute', width: 240, height: 240, borderRadius: 120, backgroundColor: midGlowColor }} />
+            <View {...ballPan.panHandlers} style={styles.canvasWrap}>
+              {showCanvas && (
+                <Suspense fallback={<ActivityIndicator size="large" color={theme.accent} />}>
+                  <Canvas
+                    key={canvasVersion}
+                    camera={{ position: [0, 0, 5.8], fov: 40 }}
+                    onCreated={configureThreeNativeRenderer}
+                    style={styles.canvas}
+                  >
+                    <ambientLight intensity={0.8} color="#ffffff" />
+                    <directionalLight position={[6, 8, 8]} intensity={2.2} color="#ffffff" />
+                    <directionalLight position={[-6, 4, 4]} intensity={1.4} color={theme.accentAlt} />
+                    <directionalLight position={[0, -8, 5]} intensity={0.9} color="#4B1631" />
+                    <BackgroundDust />
+                    <TexturedVisioball rotationRef={ballRotRef} />
+                  </Canvas>
+                </Suspense>
+              )}
+            </View>
+          </View>
+
+          <View style={styles.bottom}>
+            <View style={styles.bottomCard}>
+
+              <View style={styles.trackRow}>
+                <View style={styles.trackArt}>
+                  <Ionicons name="musical-notes" size={20} color={theme.accent} />
+                </View>
+                <View style={styles.trackInfo}>
+                  <Text style={styles.trackTitle} numberOfLines={1}>{currentTrack.title}</Text>
+                  <Text style={styles.trackMeta}>{currentTrack.genre} · {currentTrack.duration}</Text>
+                </View>
+                {displayIsPlaying && (
+                  <View style={styles.playingBadge}>
+                    <Animated.View style={[styles.playingDot, { opacity: livePulse }]} />
+                    <Text style={styles.playingText}>LIVE</Text>
+                  </View>
+                )}
+              </View>
+
+              <View style={styles.musicControls}>
+                <Animated.View style={{ transform: [{ scale: skipBackScale }] }}>
+                  <Pressable
+                    style={styles.ctrlBtn}
+                    onPress={skipPrev}
+                    onPressIn={() => pressIn(skipBackScale)}
+                    onPressOut={() => pressOut(skipBackScale)}
+                  >
+                    <Ionicons name="play-skip-back" size={22} color="#60A5FA" />
+                  </Pressable>
+                </Animated.View>
+
+                <Animated.View style={{ transform: [{ scale: playScale }] }}>
+                  <Pressable
+                    onPress={togglePlay}
+                    onPressIn={() => pressIn(playScale)}
+                    onPressOut={() => pressOut(playScale)}
+                    style={styles.playBtn}
+                  >
+                    <Ionicons
+                      name={displayIsPlaying ? 'pause' : 'play'}
+                      size={28}
+                      color="#F9FAFB"
+                      style={!displayIsPlaying && { marginLeft: 3 }}
+                    />
+                  </Pressable>
+                </Animated.View>
+
+                <Animated.View style={{ transform: [{ scale: skipFwdScale }] }}>
+                  <Pressable
+                    style={styles.ctrlBtn}
+                    onPress={skipNext}
+                    onPressIn={() => pressIn(skipFwdScale)}
+                    onPressOut={() => pressOut(skipFwdScale)}
+                  >
+                    <Ionicons name="play-skip-forward" size={22} color={theme.accentAlt} />
+                  </Pressable>
+                </Animated.View>
+              </View>
+
+              <View style={styles.volumeSection}>
+                <View style={styles.volumeHeader}>
+                  <Text style={styles.volumeLabel}>{t('volume')}</Text>
+                  <Text style={styles.volumeValue}>{volume}</Text>
+                </View>
+                <FrequencySlider
+                  value={volume}
+                  minimumValue={0}
+                  maximumValue={100}
+                  step={5}
+                  onValueChange={setVolume}
+                  onSlidingComplete={handleVolumeComplete}
+                />
+                <View style={styles.ticksRow}>
+                  {VOLUME_STEPS.map(step => (
+                    <View key={step} style={styles.tickItem}>
+                      <View style={[styles.tickDot, volume >= step && styles.tickDotActive]} />
+                      {step % 20 === 0 && (
+                        <Text style={[styles.tickLabel, volume >= step && styles.tickLabelActive]}>
+                          {step}
+                        </Text>
+                      )}
+                    </View>
+                  ))}
+                </View>
+              </View>
+
+              <View style={styles.cardDivider} />
+
+              <View style={styles.actionRow}>
+                <Pressable
+                  style={({ pressed }) => [styles.primaryBtn, pressed && styles.pressed]}
+                  onPress={() => router.push('/radar')}
+                >
+                  <Ionicons name="scan" size={20} color="#fff" />
+                  <Text style={styles.primaryBtnText}>{t('radarScan')}</Text>
+                </Pressable>
+                <Pressable
+                  style={({ pressed }) => [styles.secondaryBtn, pressed && styles.pressed]}
+                  onPress={() => setShowOptions(true)}
+                >
+                  <Ionicons name="options-outline" size={22} color={theme.accentStrong} />
+                </Pressable>
+              </View>
+
+            </View>
+          </View>
+
+        </View>
+      </SafeAreaView>
+
+      <Modal visible={showOptions} animationType="slide" transparent>
+        <View style={styles.overlay}>
+          <View style={styles.sheet}>
+            <View style={styles.handle} />
+
+            <View style={styles.sheetHeader}>
+              <Text style={styles.sheetTitle}>{t('deviceSettings')}</Text>
+              <Pressable onPress={() => setShowOptions(false)} style={({ pressed }) => [styles.closeBtn, pressed && styles.pressed]}>
+                <Ionicons name="close" size={20} color={theme.textMuted} />
+              </Pressable>
+            </View>
+
+            <View style={styles.stepperRow}>
+              {([
+                { key: 'speed', val: speed, set: setSpeed },
+                { key: 'interval', val: interval, set: setIntervalVal },
+              ] as const).map(({ key, val, set }) => (
+                <View key={key} style={styles.stepperCard}>
+                  <Text style={styles.stepperLabel}>{t(key)}</Text>
+                  <View style={styles.stepper}>
+                    <Pressable onPress={() => set(v => Math.max(1, v - 1))} style={({ pressed }) => [styles.stepBtn, pressed && styles.pressed]}>
+                      <Text style={styles.stepBtnText}>−</Text>
+                    </Pressable>
+                    <Text style={styles.stepVal}>{val}</Text>
+                    <Pressable onPress={() => set(v => Math.min(20, v + 1))} style={({ pressed }) => [styles.stepBtn, pressed && styles.pressed]}>
+                      <Text style={styles.stepBtnText}>+</Text>
+                    </Pressable>
+                  </View>
+                </View>
+              ))}
+            </View>
+
+            <Text style={styles.segLabel}>{t('motorMode')}</Text>
+            <View style={styles.seg}>
+              {MOTOR_MODES.map(mode => (
+                <Pressable key={mode} onPress={() => setMotorMode(mode)} style={[styles.segOpt, motorMode === mode && styles.segOptActive]}>
+                  <Text style={[styles.segText, motorMode === mode && styles.segTextActive]}>{t(MOTOR_KEYS[mode])}</Text>
+                </Pressable>
+              ))}
+            </View>
+
+            <Text style={styles.segLabel}>{t('lightMode')}</Text>
+            <View style={styles.seg}>
+              {LIGHT_MODES.map(mode => (
+                <Pressable key={mode} onPress={() => setLightMode(mode)} style={[styles.segOpt, lightMode === mode && styles.segOptActive]}>
+                  <Text style={[styles.segText, lightMode === mode && styles.segTextActive]}>{t(LIGHT_KEYS[mode])}</Text>
+                </Pressable>
+              ))}
+            </View>
+
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => void handleSaveRoutine()}
+              style={({ pressed }) => [styles.routineSaveButton, pressed && styles.pressed]}
+            >
+              <Ionicons color={theme.accent} name="bookmark-outline" size={18} />
+              <Text style={styles.routineSaveText}>{t('saveRoutine')}</Text>
+            </Pressable>
+            <Text style={styles.routineStatus}>{t(hasSavedRoutine ? 'routineSaved' : 'routineNotSaved')}</Text>
+
+            <Pressable
+              style={({ pressed }) => [styles.musicBtn, pressed && styles.pressed]}
+              onPress={() => {
+                setShowOptions(false);
+                router.replace({ pathname: '/sound', params: { from: 'landing' } });
+              }}
+            >
+              <Ionicons name="musical-notes" size={18} color="#fff" />
+              <Text style={styles.musicBtnText}>{t('soundAndMusic')}</Text>
+              <Ionicons name="chevron-forward" size={18} color="#fff" style={styles.musicChevron} />
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
+    </View>
+  );
+}
+

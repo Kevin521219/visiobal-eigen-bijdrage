@@ -1,0 +1,124 @@
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { createContext, ReactNode, useContext, useEffect, useState } from 'react';
+
+import { STORAGE_KEYS } from '../utils/storage';
+
+export type ThemeColors = {
+  bg: string;
+  bgDeep: string;
+  card: string;
+  cardAlt: string;
+  text: string;
+  textMuted: string;
+  textSubtle: string;
+  border: string;
+  borderStrong: string;
+  borderAccent: string;
+  separator: string;
+  gradStart: string;
+  gradMid: string;
+  gradEnd: string;
+  handleBar: string;
+  tickInactive: string;
+  tickLabel: string;
+  accent: string;
+  accentStrong: string;
+  accentAlt: string;
+  danger: string;
+  statusBarStyle: 'light-content' | 'dark-content';
+};
+
+const dark: ThemeColors = {
+  bg: '#080F1E',
+  bgDeep: '#091121',
+  card: '#0F1220',
+  cardAlt: '#0D1628',
+  text: '#F4F7FF',
+  textMuted: '#7A8CAE',
+  textSubtle: '#4A5268',
+  border: 'rgba(255,255,255,0.07)',
+  borderStrong: 'rgba(255,255,255,0.11)',
+  borderAccent: 'rgba(69,220,192,0.24)',
+  separator: 'rgba(255,255,255,0.06)',
+  gradStart: '#12343A',
+  gradMid: '#0D252D',
+  gradEnd: '#07171F',
+  handleBar: 'rgba(255,255,255,0.18)',
+  tickInactive: '#1E2740',
+  tickLabel: '#2A3050',
+  accent: '#63E6C7',
+  accentStrong: '#0F766E',
+  accentAlt: '#FFC078',
+  danger: '#FB7185',
+  statusBarStyle: 'light-content',
+};
+
+const light: ThemeColors = {
+  bg: '#EFF8F6',
+  bgDeep: '#E0F0EC',
+  card: '#FFFFFF',
+  cardAlt: '#F5F8FE',
+  text: '#173238',
+  textMuted: '#4C6C70',
+  textSubtle: '#829A9C',
+  border: 'rgba(80,100,200,0.10)',
+  borderStrong: 'rgba(80,100,200,0.18)',
+  borderAccent: 'rgba(15,118,110,0.24)',
+  separator: 'rgba(80,100,200,0.08)',
+  gradStart: '#BCE8DD',
+  gradMid: '#D7F0E8',
+  gradEnd: '#F2FAF7',
+  handleBar: 'rgba(80,100,200,0.20)',
+  tickInactive: '#BFC9E8',
+  tickLabel: '#8A96B5',
+  accent: '#0F766E',
+  accentStrong: '#0B625C',
+  accentAlt: '#A85C08',
+  danger: '#BE123C',
+  statusBarStyle: 'dark-content',
+};
+
+type ThemeContextType = {
+  isDark: boolean;
+  resetTheme: () => void;
+  theme: ThemeColors;
+  toggleTheme: () => void;
+};
+
+const ThemeContext = createContext<ThemeContextType>({
+  isDark: true,
+  resetTheme: () => {},
+  theme: dark,
+  toggleTheme: () => {},
+});
+
+export function ThemeProvider({ children }: { children: ReactNode }) {
+  const [isDark, setIsDark] = useState(true);
+
+  useEffect(() => {
+    AsyncStorage.getItem(STORAGE_KEYS.THEME).then(saved => {
+      if (saved === 'light') setIsDark(false);
+      else if (saved === 'dark') setIsDark(true);
+    });
+  }, []);
+
+  const toggleTheme = () =>
+    setIsDark(prev => {
+      const next = !prev;
+      void AsyncStorage.setItem(STORAGE_KEYS.THEME, next ? 'dark' : 'light');
+      return next;
+    });
+
+  const resetTheme = () => {
+    setIsDark(true);
+    void AsyncStorage.removeItem(STORAGE_KEYS.THEME);
+  };
+
+  return (
+    <ThemeContext.Provider value={{ isDark, resetTheme, theme: isDark ? dark : light, toggleTheme }}>
+      {children}
+    </ThemeContext.Provider>
+  );
+}
+
+export const useTheme = () => useContext(ThemeContext);
